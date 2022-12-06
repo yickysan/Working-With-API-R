@@ -1,0 +1,187 @@
+---
+title: "Working With APIs"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+API is an important source of data. API stands for Application Programming Interface and it is a system that allows applications communicate and share data with eac other. 
+Our goal in this project is to extract [solar resource data](https://developer.nrel.gov/docs/solar/solar-resource-v1/) for New York city using the the [data.gov API](https://api.data.gov/docs/). This is an API that allows us access to dfferent datasets with information about the United States.
+The data we will be extracting has the following output fields:
+
+* The Average Direct Normal Irradiance(avg_dni): Direct Normal Irradiance is the amount of solar radiation a surface receives per unit area.
+
+* The Average Tilt at Latitude (avg_lat_tilt): Tilt at Latitude is the amount of radiation a surface receives per unit area that doesn't arrive on a direct path from the sun.
+
+* The Average Global Horizontal Irradiance(avg_ghi): Global Horizontal Irradiance is the total amount of shortwave radiation a surface horizontal to the ground receives from above.
+
+The end result of the project is to have a dataframe of the extracted data that we can easily work with. We are going to take the following steps to achieve this:
+
+* Querying the API using `httr GET` function.
+* Extracting the JSON content from the response gotten from the API and converting it to a complex list.
+* The complex list will be converted to a dataframe.
+* A function will be created that does all of the above tasks.
+* Finally we are going to visualise the data. 
+
+
+```{r message=FALSE, warning=FALSE}
+# loading required libraries
+library(tidyverse)
+library(httr)
+library(kableExtra)
+```
+
+```{r}
+# function to render tibbles as  pdf tables
+render_table <- function(table, scale_down=F){
+  if(scale_down == T){
+    rendered_table <- kbl(table) %>% kable_styling(
+      latex_options = c("stripe", "HOLD_position", "scale_down")
+    ) 
+  } else{
+    rendered_table <- kbl(table) %>% kable_styling(
+      latex_options = c("stripe", "HOLD_position")
+    )
+  }
+  return(rendered_table)
+}
+```
+
+## Querying The API
+To query the API, we need an API key and we also need to be familliar with the url end point and the parameters that will be required. The API key and the required parameters will be stored in a list.
+
+```{r}
+api_key <- Sys.getenv("data.gov_api") 
+d_url <- "https://developer.nrel.gov/api/solar/solar_resource/v1.json"
+params <- list(api_key = api_key,lat= 41,lon = -75)
+
+response <- GET(d_url, query = params) # returns a JSON response from the query
+status_code(response) %>% print()
+http_type(response) %>% print()
+```
+
+A status code of 200 means that our query was successful and the http type showed that we got a JSON response.
+
+## Extracting JSON Content
+
+```{r}
+content <- content(response, "text") # extracts the response JSON
+json_list <- jsonlite::fromJSON(content) # converts the JSON object into a complex list
+
+str(json_list)
+```
+
+From the complex named list we have above, the data we need is stored under outputs which contains 3 more lists with the data we require. We can access the data in the lists using the names of the list as keys.
+
+```{r}
+# using the list name as key to access data
+output_list <- json_list$outputs
+avg_dni <- output_list$avg_dni$monthly
+avg_ghi <- output_list$avg_ghi$monthly
+avg_lat_tilt <- output_list$avg_lat_tilt$monthly
+
+print(avg_dni)
+```
+
+## Creating Dataframe From Lists
+
+We were able to extract 3 lists of all the data we need, to convert these lists to a dataframe we are going to use the `tibble` function. We will also be adding a month column using the `month.abb` function.
+
+```{r}
+df <- tibble(month = month.abb,avg_dni = avg_dni, 
+       avg_ghi = avg_ghi, avg_lat_tilt = avg_lat_tilt)
+
+df %>% print()
+```
+
+The output of the avg_dni, avg_ghi and avg_lat_tilt columns in our dataframe is a list data type. to fix this we simply have to unlist those columns using `dplyr mutate` function.
+
+```{r}
+df <- df %>% mutate(
+  avg_ghi = unlist(avg_ghi),
+  avg_dni = unlist(avg_dni),
+  avg_lat_tilt = unlist(avg_lat_tilt)
+)
+
+df %>% print()
+```
+
+## Creating Function To Query API
+The function we are going to create is going to query the API and return a dataframe.
+
+```{r}
+nrel_api_json_get_df <- function(endpoint, queries = list()) {
+  
+  # Preparing the URL 
+  url <- modify_url("https://developer.nrel.gov", path = endpoint)
+  
+  # API requests
+  response <- GET(url, query = queries)
+  
+  # Tracking errors
+  if ( http_error(response) ){
+    print(status_code(response))
+    print(http_status(response))
+    stop("Something went wrong.", call. = FALSE)
+  }
+  
+  if (http_type(response) != "application/json") {
+    stop("API did not return json", call. = FALSE)
+  }
+  
+  # Extracting content
+  json_text <- content(response, "text")
+  
+  # Converting content into Dataframe
+  json_list <- jsonlite::fromJSON(json_text)
+  output_list <- json_list$outputs
+  avg_dni <- output_list$avg_dni$monthly
+  avg_ghi <- output_list$avg_ghi$monthly
+  avg_lat_tilt <- output_list$avg_lat_tilt$monthly
+  
+  df <- tibble(month = month.abb,avg_dni = avg_dni, 
+       avg_ghi = avg_ghi, avg_lat_tilt = avg_lat_tilt)
+  
+  df <- df %>% mutate(
+  avg_ghi = unlist(avg_ghi),
+  avg_dni = unlist(avg_dni),
+  avg_lat_tilt = unlist(avg_lat_tilt)
+)
+  
+  # Return the dataframe  
+  df
+}
+```
+
+```{r}
+solar_resource_df <- nrel_api_json_get_df(endpoint = "api/solar/solar_resource/v1.json", queries = params )
+
+solar_resource_df %>% render_table()
+```
+
+
+## Visualising The Data.
+
+```{r}
+
+solar_resource_df %>% mutate(
+  month = factor(month, levels=month.abb))  %>% ggplot(
+    aes(x= month, y = avg_dni, group = 1)
+  ) + 
+  geom_line() +
+  geom_point() + 
+  labs(y = "Avg dni") +
+  theme_bw() 
+```
+
+From the plot we can tell that the average direct normal irradiance(avg_dni) is seasonal. It is higher during the spring and summer months and lower during the fall and winter months.
+
+## Conclusion
+This project showed a step by step approach to working with API as a data source. The goal was to extract data on New York Solar resource and we achieved that goal by:
+
+* First taking a step by step approach From querying the API to creating a dataframe we can easily work it.
+* Creating a function that follows the afformentioned steps.
+* Lastly we visualised the data to get some insights.
